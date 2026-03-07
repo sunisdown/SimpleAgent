@@ -1,0 +1,24 @@
+[project]
+name = "SimpleAgent"
+version = "0.1.0"
+description = "SimpleAgent: a Python coding-agent scaffold inspired by badlogic/pi-mono."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "SimpleAgent" }
+]
+dependencies = []
+
+[project.scripts]
+simple-agent = "simple_agent.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
