@@ -1,37 +1,35 @@
-# SimpleAgent
+# SimpleAgent (Rust)
 
-Python scaffold inspired by the architecture of `badlogic/pi-mono`:
+Rust implementation of a deterministic agent pipeline inspired by Bub/OpenClaw:
 
-- `llm` layer: provider abstraction and model response contract.
-- `agent` layer: event-driven loop with tool-calling.
-- `tools` layer: registry + executable tools.
-- `cli` layer: minimal terminal UX.
+`Route -> Record(Tape) -> Tools(view) -> Context -> Model -> Process`
+
+## Architecture
+
+- `Router` (`src/router.rs`): routes `,` commands directly (bypass model).
+- `TapeStore` (`src/memory.rs`): append-only JSONL memory with `handoff` and search.
+- `ProgressiveToolView` (`src/tool_view.rs`): lightweight tool exposure, expands on hint/use.
+- `AgentLoop` (`src/core.rs`): unified loop and tool-calling orchestration (max 15 rounds).
+- `MockProvider` (`src/llm.rs`): deterministic local provider for development.
+- Tools (`src/tools.rs`): built-in `ls`, `read`, `bash`.
+
+## Commands
+
+- `,help`
+- `,tools`
+- `,tape.search <query>`
+- `,handoff [name]`
+- `,<shell command>`
 
 ## Quickstart
 
 ```bash
-uv venv .venv
-uv pip install -e .
-uv run simple-agent "ls"
-uv run simple-agent "read README.md"
-uv run simple-agent "bash ls -la"
-```
-
-## Project Layout
-
-```text
-src/simple_agent/
-  agent.py      # agent state loop
-  events.py     # event model
-  llm.py        # model provider interfaces + mock provider
-  tools.py      # tool registry and built-in tools
-  cli.py        # command-line entrypoint
+cargo run -- "ls"
+cargo run -- ",tools"
+cargo run -- ",handoff phase-2"
 ```
 
 ## Notes
 
-- Default provider is `MockProvider` to keep local setup dependency-free.
-- Add real model providers by implementing `ModelProvider` in `llm.py`.
-- Loop behavior follows `pi-mono` structure with `agent_start`, `turn_start`, `message_*`, `tool_execution_*`, `turn_end`, `agent_end`.
-- No fixed `max_turns` limit in the loop; continuation is driven by tool calls, steering, and follow-up messages.
-- Built-in tools are `ls`, `read`, and `bash`, with `pi-mono`-style argument validation and truncation metadata.
+- Session memory is stored at `.simple_agent/<session>.jsonl`.
+- Shell command route uses `/bin/sh -c` with a 30s timeout.
