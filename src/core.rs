@@ -16,6 +16,8 @@ pub struct AgentLoop<P: ModelProvider> {
     router: Router,
     max_rounds: usize,
     context_window: usize,
+    max_tool_calls_per_round: usize,
+    max_stalled_rounds: usize,
     tool_view: ProgressiveToolView,
 }
 
@@ -30,6 +32,8 @@ impl<P: ModelProvider> AgentLoop<P> {
             router: Router,
             max_rounds: 15,
             context_window: 50,
+            max_tool_calls_per_round: 6,
+            max_stalled_rounds: 3,
             tool_view,
         }
     }
@@ -48,55 +52,107 @@ impl<P: ModelProvider> AgentLoop<P> {
 
         let mut messages = self.tape.build_messages(self.context_window)?;
         let mut seen_calls: HashSet<String> = HashSet::new();
+        let mut previous_plan: Option<String> = None;
+        let mut repeated_plan_rounds = 0usize;
+        let mut stalled_rounds = 0usize;
 
-        for _ in 0..self.max_rounds {
+        for _round in 0..self.max_rounds {
             self.tool_view.activate_hints(text);
             let assistant = self.provider.generate(&messages, &self.tool_view.specs());
             self.tape.append_message(&assistant)?;
             messages.push(assistant.clone());
 
-            let tool_calls = assistant
-                .content
-                .iter()
-                .filter_map(|c| match c {
-                    ContentItem::ToolCall {
-                        id,
-                        name,
-                        arguments,
-                    } => Some((id.clone(), name.clone(), arguments.clone())),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-
+            let tool_calls = collect_tool_calls(&assistant);
             if tool_calls.is_empty() {
                 return Ok(extract_text(&assistant));
             }
 
-            for (call_id, tool_name, args) in tool_calls {
-                let signature = format!("{}:{:?}", tool_name, args);
-                let tool_result = if seen_calls.contains(&signature) {
-                    make_tool_result(
-                        &call_id,
-                        &tool_name,
-                        format!("Skipped repeated tool call: {}", tool_name),
+            let plan = signature_for_plan(&tool_calls);
+            if previous_plan.as_deref() == Some(plan.as_str()) {
+                repeated_plan_rounds += 1;
+            } else {
+                repeated_plan_rounds = 0;
+            }
+            previous_plan = Some(plan);
+
+            if repeated_plan_rounds >= 2 {
+                return Ok(
+                    "Stopped: the model repeated the same tool plan in consecutive rounds."
+                        .to_string(),
+                );
+            }
+
+            let mut succeeded_calls = 0usize;
+            let mut attempted_calls = 0usize;
+
+            for (idx, (call_id, tool_name, args)) in tool_calls.iter().enumerate() {
+                if idx >= self.max_tool_calls_per_round {
+                    let limit_result = make_tool_result(
+                        "loop_guard",
+                        "system",
+                        format!(
+                            "Tool plan exceeded per-round limit ({}). Remaining calls were skipped.",
+                            self.max_tool_calls_per_round
+                        ),
+                    );
+                    self.tape.append_message(&limit_result)?;
+                    messages.push(limit_result);
+                    break;
+                }
+
+                attempted_calls += 1;
+                let call_signature = format!("{}:{:?}", tool_name, args);
+                let (tool_result, status) = if seen_calls.contains(&call_signature) {
+                    (
+                        make_tool_result(
+                            call_id,
+                            tool_name,
+                            format!(
+                                "Skipped duplicate tool call for this turn history: {} {:?}",
+                                tool_name, args
+                            ),
+                        ),
+                        "duplicate",
                     )
                 } else {
-                    seen_calls.insert(signature);
-                    self.tool_view.note_selected(&tool_name);
-                    match self.tools.execute(&self.workspace, &tool_name, &args) {
-                        Ok(result) => make_tool_result(&call_id, &tool_name, result.text),
-                        Err(err) => make_tool_result(&call_id, &tool_name, err),
+                    seen_calls.insert(call_signature);
+                    self.tool_view.note_selected(tool_name);
+                    match self.tools.execute(&self.workspace, tool_name, args) {
+                        Ok(result) => {
+                            succeeded_calls += 1;
+                            (make_tool_result(call_id, tool_name, result.text), "ok")
+                        }
+                        Err(err) => (make_tool_result(call_id, tool_name, err), "error"),
                     }
                 };
 
                 self.tape.append_message(&tool_result)?;
-                self.tape
-                    .append_event("tool_call", &format!("tool={} args={:?}", tool_name, args))?;
+                self.tape.append_event(
+                    "tool_call",
+                    &format!("tool={} status={} args={:?}", tool_name, status, args),
+                )?;
                 messages.push(tool_result);
+            }
+
+            let was_stalled = attempted_calls == 0 || succeeded_calls == 0;
+            if was_stalled {
+                stalled_rounds += 1;
+            } else {
+                stalled_rounds = 0;
+            }
+
+            if stalled_rounds >= self.max_stalled_rounds {
+                return Ok(format!(
+                    "Stopped after {} stalled tool rounds (no successful calls).",
+                    stalled_rounds
+                ));
             }
         }
 
-        Ok("Tool-calling loop reached max rounds (15).".to_string())
+        Ok(format!(
+            "Tool-calling loop reached max rounds ({}).",
+            self.max_rounds
+        ))
     }
 
     fn handle_command(&mut self, command: &str, args: &str) -> Result<String, String> {
@@ -168,5 +224,92 @@ impl<P: ModelProvider> AgentLoop<P> {
         }
 
         Ok(format!("$ {command}\n{text}"))
+    }
+}
+
+fn collect_tool_calls(message: &Message) -> Vec<(String, String, Vec<(String, String)>)> {
+    message
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            ContentItem::ToolCall {
+                id,
+                name,
+                arguments,
+            } => Some((id.clone(), name.clone(), arguments.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+}
+
+fn signature_for_plan(tool_calls: &[(String, String, Vec<(String, String)>)]) -> String {
+    tool_calls
+        .iter()
+        .map(|(_, name, args)| format!("{}:{:?}", name, args))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::llm::{ContentItem, Message, ModelProvider, ToolSpec};
+    use crate::tools::{AgentTool, AgentToolResult, ToolRegistry};
+
+    struct RepeatingToolProvider;
+
+    impl ModelProvider for RepeatingToolProvider {
+        fn generate(&mut self, _messages: &[Message], _tools: &[ToolSpec]) -> Message {
+            Message {
+                role: "assistant".to_string(),
+                content: vec![ContentItem::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "noop".to_string(),
+                    arguments: vec![("x".to_string(), "1".to_string())],
+                }],
+            }
+        }
+    }
+
+    fn unique_tape_path() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("simple-agent-test-{nanos}.tape"))
+    }
+
+    #[test]
+    fn stops_when_tool_plan_repeats() {
+        let tape_path = unique_tape_path();
+        let tape = TapeStore::new(tape_path.clone()).expect("tape init");
+
+        let tool = AgentTool {
+            spec: ToolSpec {
+                name: "noop".to_string(),
+                description: "no-op".to_string(),
+            },
+            exec: Box::new(|_, _| {
+                Ok(AgentToolResult {
+                    text: "ok".to_string(),
+                })
+            }),
+        };
+        let registry = ToolRegistry::new(vec![tool]);
+
+        let mut agent = AgentLoop::new(
+            RepeatingToolProvider,
+            registry,
+            tape,
+            std::env::current_dir().expect("cwd"),
+        );
+
+        let output = agent.handle_input("run noop").expect("handle input");
+        assert!(output.contains("repeated the same tool plan"));
+
+        let _ = fs::remove_file(tape_path);
     }
 }
