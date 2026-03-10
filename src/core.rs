@@ -158,7 +158,7 @@ impl<P: ModelProvider> AgentLoop<P> {
     fn handle_command(&mut self, command: &str, args: &str) -> Result<String, String> {
         match command {
             "help" | "h" => Ok(
-                "Commands:\n,help\n,tools\n,tape.search <query>\n,handoff [name]\n,<shell command>"
+                "Commands:\n/help\n/tools\n/tape.search <query>\n/handoff [name]\n!<shell command>"
                     .to_string(),
             ),
             "tools" => Ok(self
@@ -193,7 +193,8 @@ impl<P: ModelProvider> AgentLoop<P> {
                     "Handoff anchor '{name}' created. Context window reset ({before} entries before)."
                 ))
             }
-            _ => self.run_shell(&format!("{} {}", command, args).trim().to_string()),
+            "shell" => self.run_shell(args),
+            _ => Ok(format!("Unknown command: {command}. Try /help.")),
         }
     }
 

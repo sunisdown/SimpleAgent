@@ -6,7 +6,7 @@ Rust implementation of a deterministic agent pipeline inspired by Bub/OpenClaw:
 
 ## Architecture
 
-- `Router` (`src/router.rs`): routes `,` commands directly (bypass model).
+- `Router` (`src/router.rs`): routes `/` commands and `!` shell invocations directly (bypass model).
 - `TapeStore` (`src/memory.rs`): append-only JSONL memory with `handoff` and search.
 - `ProgressiveToolView` (`src/tool_view.rs`): lightweight tool exposure, expands on hint/use.
 - `AgentLoop` (`src/core.rs`): unified loop and tool-calling orchestration (max 15 rounds).
@@ -15,18 +15,18 @@ Rust implementation of a deterministic agent pipeline inspired by Bub/OpenClaw:
 
 ## Commands
 
-- `,help`
-- `,tools`
-- `,tape.search <query>`
-- `,handoff [name]`
-- `,<shell command>`
+- `/help`
+- `/tools`
+- `/tape.search <query>`
+- `/handoff [name]`
+- `!<shell command>`
 
 ## Quickstart
 
 ```bash
 cargo run -- "ls"
-cargo run -- ",tools"
-cargo run -- ",handoff phase-2"
+cargo run -- "/tools"
+cargo run -- "/handoff phase-2"
 ```
 
 ## Notes
