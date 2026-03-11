@@ -5,6 +5,7 @@ use std::process::Command;
 use crate::llm::{extract_text, AbortSignal, ContentItem, Message, ModelProvider, ProviderRequest};
 use crate::memory::TapeStore;
 use crate::router::{RouteKind, Router};
+use crate::runtime::RuntimeProfile;
 use crate::tool_view::ProgressiveToolView;
 use crate::tools::{make_tool_result, AgentToolResult, ToolRegistry};
 
@@ -22,10 +23,17 @@ pub struct AgentLoop<P: ModelProvider> {
     max_tool_calls_per_round: usize,
     max_stalled_rounds: usize,
     tool_view: ProgressiveToolView,
+    profile: RuntimeProfile,
 }
 
 impl<P: ModelProvider> AgentLoop<P> {
-    pub fn new(provider: P, tools: ToolRegistry, tape: TapeStore, workspace: PathBuf) -> Self {
+    pub fn new(
+        provider: P,
+        tools: ToolRegistry,
+        tape: TapeStore,
+        workspace: PathBuf,
+        profile: RuntimeProfile,
+    ) -> Self {
         let tool_view = ProgressiveToolView::new(tools.specs());
         Self {
             provider,
@@ -38,6 +46,7 @@ impl<P: ModelProvider> AgentLoop<P> {
             max_tool_calls_per_round: 6,
             max_stalled_rounds: 3,
             tool_view,
+            profile,
         }
     }
 
@@ -78,6 +87,7 @@ impl<P: ModelProvider> AgentLoop<P> {
                         .collect::<Vec<_>>()
                         .join(","),
                 ),
+                ("profile".to_string(), self.profile.name().to_string()),
             ],
         )?;
 
@@ -105,6 +115,7 @@ impl<P: ModelProvider> AgentLoop<P> {
                             .collect::<Vec<_>>()
                             .join(","),
                     ),
+                    ("profile".to_string(), self.profile.name().to_string()),
                 ],
             )?;
             let response = self.provider.generate(
@@ -282,7 +293,7 @@ impl<P: ModelProvider> AgentLoop<P> {
     fn handle_command(&mut self, command: &str, args: &str) -> Result<String, String> {
         match command {
             "help" | "h" => Ok(
-                "Commands:\n/help\n/tools\n/tape.search <query>\n/handoff [name]\n!<shell command>"
+                "Commands:\n/help\n/tools\n/trace [turn]\n/tape.search <query>\n/handoff [name]\n/handoff.list\n!<shell command>"
                     .to_string(),
             ),
             "tools" => Ok(self
@@ -292,6 +303,7 @@ impl<P: ModelProvider> AgentLoop<P> {
                 .map(|s| format!("- {}: {}", s.name, s.description))
                 .collect::<Vec<_>>()
                 .join("\n")),
+            "trace" => self.render_trace(args),
             "tape.search" => {
                 let results = self.tape.search(args)?;
                 if results.is_empty() {
@@ -304,6 +316,7 @@ impl<P: ModelProvider> AgentLoop<P> {
                     .collect::<Vec<_>>()
                     .join("\n"))
             }
+            "handoff.list" => self.list_handoffs(),
             "handoff" => {
                 let before = self.tape.entries()?.len();
                 let name = if args.trim().is_empty() {
@@ -314,12 +327,95 @@ impl<P: ModelProvider> AgentLoop<P> {
                 self.tape
                     .append_anchor(&name, &format!("entries_before={before}"), "handoff")?;
                 Ok(format!(
-                    "Handoff anchor '{name}' created. Context window reset ({before} entries before)."
+                    "✅ handoff '{name}' created at tape entry #{before}.\nUse /trace for recent activity or /handoff.list to inspect saved anchors."
                 ))
             }
-            "shell" => self.run_shell(args),
+            "shell" => {
+                if !self.profile.shell_route_allowed() {
+                    return Ok(
+                        "Shell command route is disabled for this runtime profile.".to_string()
+                    );
+                }
+                self.run_shell(args)
+            }
             _ => Ok(format!("Unknown command: {command}. Try /help.")),
         }
+    }
+
+    fn list_handoffs(&self) -> Result<String, String> {
+        let entries = self.tape.entries()?;
+        let handoffs = entries
+            .iter()
+            .filter(|e| e.entry_type == "handoff")
+            .collect::<Vec<_>>();
+        if handoffs.is_empty() {
+            return Ok("No handoff anchors yet. Use /handoff [name].".to_string());
+        }
+
+        Ok(handoffs
+            .iter()
+            .map(|h| format!("#{} {}", h.id, h.payload))
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+
+    fn render_trace(&self, args: &str) -> Result<String, String> {
+        let entries = self.tape.entries()?;
+        let turn_markers = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                e.entry_type == "event" && e.payload.contains("\"event\":\"turn_start\"")
+            })
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+
+        if turn_markers.is_empty() {
+            return Ok("No trace data yet. Send a normal prompt first.".to_string());
+        }
+
+        let requested_turn = if args.trim().is_empty() {
+            turn_markers.len()
+        } else {
+            args.trim()
+                .parse::<usize>()
+                .map_err(|_| "Usage: /trace [turn_number]".to_string())?
+        };
+
+        if requested_turn == 0 || requested_turn > turn_markers.len() {
+            return Ok(format!(
+                "Turn {} not found. Valid turn range: 1..={}",
+                requested_turn,
+                turn_markers.len()
+            ));
+        }
+
+        let start_idx = turn_markers[requested_turn - 1];
+        let end_idx = if requested_turn < turn_markers.len() {
+            turn_markers[requested_turn] - 1
+        } else {
+            entries.len().saturating_sub(1)
+        };
+
+        let mut lines = vec![format!(
+            "Trace for turn {} (entries #{}..#{}):",
+            requested_turn, entries[start_idx].id, entries[end_idx].id
+        )];
+
+        for entry in entries.iter().skip(start_idx).take(end_idx - start_idx + 1) {
+            let preview = entry.payload.replace("\n", " ");
+            let compact = if preview.len() > 140 {
+                format!("{}...", &preview[..140])
+            } else {
+                preview
+            };
+            lines.push(format!(
+                "- #{} [{}] {}",
+                entry.id, entry.entry_type, compact
+            ));
+        }
+
+        Ok(lines.join("\n"))
     }
 
     fn run_shell(&self, command: &str) -> Result<String, String> {
@@ -453,6 +549,7 @@ mod tests {
             registry,
             tape,
             std::env::current_dir().expect("cwd"),
+            RuntimeProfile::Yolo,
         );
 
         let output = agent.handle_input("run noop").expect("handle input");
