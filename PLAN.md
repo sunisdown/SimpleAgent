@@ -33,10 +33,10 @@ This plan breaks `docs/pi-agent-design.md` into implementation phases and define
 ## Phase 3 — Workflow Ergonomics
 
 ### Deliverables
-- Add explicit runtime profiles (`yolo`, `readonly`, `custom`).
-- Document file-first planning workflow (`PLAN.md`, `TODO.md`).
-- Improve trace/handoff UX commands and output readability.
-- Add tmux workflow documentation for long-running processes.
+- [x] Add explicit runtime profiles (`yolo`, `readonly`, `custom`).
+- [x] Document file-first planning workflow (`PLAN.md`, `TODO.md`).
+- [x] Improve trace/handoff UX commands and output readability.
+- [x] Add tmux workflow documentation for long-running processes.
 
 ## Phase 4 — Optional Advanced
 

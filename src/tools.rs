@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::llm::{ContentItem, Message, ToolArgSpec, ToolSpec};
+use crate::runtime::RuntimeProfile;
 
 pub struct AgentToolResult {
     pub llm_output: String,
@@ -51,6 +52,34 @@ impl ToolRegistry {
 
 pub fn create_default_tools() -> Vec<AgentTool> {
     vec![create_ls_tool(), create_read_tool(), create_bash_tool()]
+}
+
+pub fn create_profile_tools(profile: &RuntimeProfile) -> Result<Vec<AgentTool>, String> {
+    match profile {
+        RuntimeProfile::Yolo => Ok(create_default_tools()),
+        RuntimeProfile::Readonly => Ok(vec![create_ls_tool(), create_read_tool()]),
+        RuntimeProfile::Custom(names) => {
+            let mut selected = Vec::new();
+            for name in names {
+                selected.push(match name.as_str() {
+                    "ls" => create_ls_tool(),
+                    "read" => create_read_tool(),
+                    "bash" => create_bash_tool(),
+                    other => {
+                        return Err(format!(
+                            "Unknown tool '{other}'. Supported tools: {}",
+                            supported_tool_names().join(", ")
+                        ))
+                    }
+                });
+            }
+            Ok(selected)
+        }
+    }
+}
+
+pub fn supported_tool_names() -> Vec<&'static str> {
+    vec!["ls", "read", "bash"]
 }
 
 pub fn make_tool_result(_call_id: &str, _tool_name: &str, result: &AgentToolResult) -> Message {
