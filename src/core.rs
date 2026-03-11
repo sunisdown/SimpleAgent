@@ -99,7 +99,8 @@ impl<P: ModelProvider> AgentLoop<P> {
 
         let mut seen_tool_calls = HashSet::new();
 
-        for round in 0..self.config.limits.max_rounds {
+        let mut round = 0usize;
+        loop {
             self.tool_view.activate_hints(input);
             let visible_tools = self.tool_view.specs();
 
@@ -230,16 +231,9 @@ impl<P: ModelProvider> AgentLoop<P> {
                     }
                 }
             }
-        }
 
-        self.tape.append_event(
-            "turn_stop",
-            &[("reason".to_string(), "max_rounds".to_string())],
-        )?;
-        Ok(format!(
-            "stopped after {} rounds",
-            self.config.limits.max_rounds
-        ))
+            round += 1;
+        }
     }
 
     fn record_stream_events(&self, round: usize, stream: &[StreamEvent]) -> Result<(), String> {

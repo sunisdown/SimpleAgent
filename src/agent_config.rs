@@ -1,6 +1,5 @@
 #[derive(Clone, Debug)]
 pub struct LoopLimits {
-    pub max_rounds: usize,
     pub context_window: usize,
     pub max_tool_calls_per_round: usize,
 }
@@ -8,7 +7,6 @@ pub struct LoopLimits {
 impl Default for LoopLimits {
     fn default() -> Self {
         Self {
-            max_rounds: 15,
             context_window: 50,
             max_tool_calls_per_round: 4,
         }
