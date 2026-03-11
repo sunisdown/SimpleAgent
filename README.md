@@ -1,66 +1,45 @@
 # SimpleAgent (Rust)
 
-Rust implementation of a deterministic agent pipeline inspired by Bub/OpenClaw:
-
-`Route -> Record(Tape) -> Tools(view) -> Context -> Model -> Process`
+A minimal, opinionated coding agent harness rebuilt from the design doc in `docs/pi-agent-design.md`.
 
 ## Architecture
 
-- `Router` (`src/router.rs`): routes `/` commands and `!` shell invocations directly (bypass model).
-- `TapeStore` (`src/memory.rs`): append-only JSONL memory with `handoff`, `trace`, and search.
-- `ProgressiveToolView` (`src/tool_view.rs`): lightweight tool exposure, expands on hint/use.
-- `AgentLoop` (`src/core.rs`): unified loop and tool-calling orchestration (max 15 rounds).
-- `MockProvider` + provider adapter API (`src/llm.rs`): normalized provider request/response shape with usage accounting, streaming events, and abort signal support.
-- Tools (`src/tools.rs`): built-in `ls`, `read`, `bash`.
-- Runtime profiles (`src/runtime.rs`): `yolo`, `readonly`, and `custom`.
+Simple layered architecture:
+
+1. **LLM Adapter Layer** (`src/llm.rs`)
+   - Unified request/response model.
+   - Streaming events (`text delta`, `tool call delta`, `done`).
+   - Context serialize/deserialize helpers.
+
+2. **Agent Core Layer** (`src/core.rs`)
+   - Deterministic turn loop.
+   - Tool-call execution and validation.
+   - Structured tape event emission.
+
+3. **CLI Layer** (`src/main.rs`)
+   - Session setup and runtime profile selection.
+   - Prompt dispatch.
+
+Supporting modules:
+- `src/tools.rs`: minimal coding tools (`read`, `write`, `edit`, `bash`) with typed args.
+- `src/memory.rs`: append-only JSONL tape store.
+- `src/runtime.rs`: runtime profiles (`yolo`, `readonly`, `custom`).
+- `src/agent_config.rs`: versioned system prompt + loop limits.
+- `src/router.rs`: slash-command and shell-route parsing.
+- `src/tool_view.rs`: progressive tool visibility.
 
 ## Commands
 
 - `/help`
 - `/tools`
-- `/trace [turn]`
-- `/tape.search <query>`
-- `/handoff [name]`
-- `/handoff.list`
-- `!<shell command>`
+- `/trace`
+- `/handoff <name>`
+- `!<shell command>` (if profile allows)
 
-## Runtime profiles
-
-- `yolo` (default): full toolset (`ls`, `read`, `bash`) and shell route enabled.
-- `readonly`: read-only exploration toolset (`ls`, `read`) and shell route disabled.
-- `custom`: user-provided allowlist via `--tools`.
-
-Examples:
+## Run
 
 ```bash
-cargo run -- --profile yolo "ls"
+cargo run -- --profile yolo "read README.md"
 cargo run -- --profile readonly "/tools"
-cargo run -- --profile custom --tools ls,read "read README.md"
+cargo run -- --profile custom --tools read,edit "read src/main.rs"
 ```
-
-## File-first planning workflow
-
-Use repo files as explicit planning state:
-
-- `PLAN.md`: long-running design and phase execution plans.
-- `TODO.md`: short checklists and current execution queue.
-
-Recommended loop:
-
-1. update `PLAN.md` with phase scope,
-2. maintain actionable items in `TODO.md`,
-3. implement and validate,
-4. checkpoint with `/handoff <name>`.
-
-## Long-running process workflow (tmux)
-
-See `docs/tmux-workflow.md` for a terminal-first workflow for servers, watchers, and debugging sessions.
-
-## Notes
-
-- Session memory is stored at `.simple_agent/<session>.tape`.
-- Shell command route uses `/bin/sh -c` with a 30s timeout.
-
-## Design
-
-- Detailed Pi-inspired design doc: `docs/pi-agent-design.md`

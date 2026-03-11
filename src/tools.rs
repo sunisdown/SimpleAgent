@@ -24,11 +24,12 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new(tools: Vec<AgentTool>) -> Self {
-        let map = tools
-            .into_iter()
-            .map(|t| (t.spec.name.clone(), t))
-            .collect::<HashMap<_, _>>();
-        Self { tools: map }
+        Self {
+            tools: tools
+                .into_iter()
+                .map(|t| (t.spec.name.clone(), t))
+                .collect(),
+        }
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
@@ -44,96 +45,40 @@ impl ToolRegistry {
         let tool = self
             .tools
             .get(name)
-            .ok_or_else(|| format!("Tool {name} not found"))?;
+            .ok_or_else(|| format!("Unknown tool: {name}"))?;
         validate_args(&tool.spec, args)?;
         (tool.exec)(cwd, args)
     }
 }
 
-pub fn create_default_tools() -> Vec<AgentTool> {
-    vec![create_ls_tool(), create_read_tool(), create_bash_tool()]
-}
-
 pub fn create_profile_tools(profile: &RuntimeProfile) -> Result<Vec<AgentTool>, String> {
+    let all = vec![
+        create_read_tool(),
+        create_write_tool(),
+        create_edit_tool(),
+        create_bash_tool(),
+    ];
     match profile {
-        RuntimeProfile::Yolo => Ok(create_default_tools()),
-        RuntimeProfile::Readonly => Ok(vec![create_ls_tool(), create_read_tool()]),
-        RuntimeProfile::Custom(names) => {
-            let mut selected = Vec::new();
-            for name in names {
-                selected.push(match name.as_str() {
-                    "ls" => create_ls_tool(),
-                    "read" => create_read_tool(),
-                    "bash" => create_bash_tool(),
-                    other => {
-                        return Err(format!(
-                            "Unknown tool '{other}'. Supported tools: {}",
-                            supported_tool_names().join(", ")
-                        ))
-                    }
-                });
+        RuntimeProfile::Yolo => Ok(all),
+        RuntimeProfile::Readonly => Ok(vec![create_read_tool()]),
+        RuntimeProfile::Custom(allowlist) => {
+            let allowed = allowlist.iter().cloned().collect::<HashSet<_>>();
+            let selected = all
+                .into_iter()
+                .filter(|t| allowed.contains(&t.spec.name))
+                .collect::<Vec<_>>();
+            if selected.is_empty() {
+                return Err("No valid tools selected. Valid: read,write,edit,bash".to_string());
             }
             Ok(selected)
         }
     }
 }
 
-pub fn supported_tool_names() -> Vec<&'static str> {
-    vec!["ls", "read", "bash"]
-}
-
-pub fn make_tool_result(_call_id: &str, _tool_name: &str, result: &AgentToolResult) -> Message {
+pub fn make_tool_message(result: &AgentToolResult) -> Message {
     Message {
-        role: "toolResult".to_string(),
+        role: "tool".to_string(),
         content: vec![ContentItem::Text(result.llm_output.clone())],
-    }
-}
-
-fn create_ls_tool() -> AgentTool {
-    AgentTool {
-        spec: ToolSpec {
-            name: "ls".to_string(),
-            description: "List directory contents".to_string(),
-            args: vec![ToolArgSpec {
-                name: "path".to_string(),
-                description: "Directory to list".to_string(),
-                required: false,
-            }],
-        },
-        exec: Box::new(|cwd, args| {
-            let path = arg(args, "path").unwrap_or_else(|| ".".to_string());
-            let resolved = resolve(cwd, &path);
-            if !resolved.exists() {
-                return Err(format!("Path not found: {}", resolved.display()));
-            }
-            if !resolved.is_dir() {
-                return Err(format!("Not a directory: {}", resolved.display()));
-            }
-            let mut names = fs::read_dir(&resolved)
-                .map_err(|e| e.to_string())?
-                .flatten()
-                .map(|e| {
-                    let mut name = e.file_name().to_string_lossy().to_string();
-                    if e.path().is_dir() {
-                        name.push('/');
-                    }
-                    name
-                })
-                .collect::<Vec<_>>();
-            names.sort();
-            let text = if names.is_empty() {
-                "(empty directory)".to_string()
-            } else {
-                names.join("\n")
-            };
-            Ok(AgentToolResult {
-                llm_output: text,
-                ui_details: vec![
-                    ("path".to_string(), resolved.display().to_string()),
-                    ("entries".to_string(), names.len().to_string()),
-                ],
-            })
-        }),
     }
 }
 
@@ -141,36 +86,99 @@ fn create_read_tool() -> AgentTool {
     AgentTool {
         spec: ToolSpec {
             name: "read".to_string(),
-            description: "Read file content".to_string(),
+            description: "Read UTF-8 file content".to_string(),
             args: vec![ToolArgSpec {
                 name: "path".to_string(),
-                description: "File path to read".to_string(),
                 required: true,
+                description: "Path to file".to_string(),
             }],
         },
         exec: Box::new(|cwd, args| {
-            let path =
-                arg(args, "path").ok_or_else(|| "Missing required argument: path".to_string())?;
+            let path = arg_required(args, "path")?;
             let resolved = resolve(cwd, &path);
-            if !resolved.exists() {
-                return Err(format!("Path not found: {}", resolved.display()));
-            }
-            if !resolved.is_file() {
-                return Err(format!("Not a file: {}", resolved.display()));
-            }
             let text = fs::read_to_string(&resolved).map_err(|e| e.to_string())?;
             Ok(AgentToolResult {
                 llm_output: text,
                 ui_details: vec![
+                    ("tool".to_string(), "read".to_string()),
                     ("path".to_string(), resolved.display().to_string()),
-                    (
-                        "bytes".to_string(),
-                        fs::metadata(resolved)
-                            .map_err(|e| e.to_string())?
-                            .len()
-                            .to_string(),
-                    ),
                 ],
+            })
+        }),
+    }
+}
+
+fn create_write_tool() -> AgentTool {
+    AgentTool {
+        spec: ToolSpec {
+            name: "write".to_string(),
+            description: "Write full content to file".to_string(),
+            args: vec![
+                ToolArgSpec {
+                    name: "path".to_string(),
+                    required: true,
+                    description: "Path to file".to_string(),
+                },
+                ToolArgSpec {
+                    name: "content".to_string(),
+                    required: true,
+                    description: "New file content".to_string(),
+                },
+            ],
+        },
+        exec: Box::new(|cwd, args| {
+            let path = arg_required(args, "path")?;
+            let content = arg_required(args, "content")?;
+            let resolved = resolve(cwd, &path);
+            if let Some(parent) = resolved.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            fs::write(&resolved, content.as_bytes()).map_err(|e| e.to_string())?;
+            Ok(AgentToolResult {
+                llm_output: format!("wrote {} bytes", content.len()),
+                ui_details: vec![("path".to_string(), resolved.display().to_string())],
+            })
+        }),
+    }
+}
+
+fn create_edit_tool() -> AgentTool {
+    AgentTool {
+        spec: ToolSpec {
+            name: "edit".to_string(),
+            description: "Replace substring in file".to_string(),
+            args: vec![
+                ToolArgSpec {
+                    name: "path".to_string(),
+                    required: true,
+                    description: "Path to file".to_string(),
+                },
+                ToolArgSpec {
+                    name: "find".to_string(),
+                    required: true,
+                    description: "Text to find".to_string(),
+                },
+                ToolArgSpec {
+                    name: "replace".to_string(),
+                    required: true,
+                    description: "Replacement text".to_string(),
+                },
+            ],
+        },
+        exec: Box::new(|cwd, args| {
+            let path = arg_required(args, "path")?;
+            let find = arg_required(args, "find")?;
+            let replace = arg_required(args, "replace")?;
+            let resolved = resolve(cwd, &path);
+            let text = fs::read_to_string(&resolved).map_err(|e| e.to_string())?;
+            if !text.contains(&find) {
+                return Err("edit failed: find text not found".to_string());
+            }
+            let updated = text.replace(&find, &replace);
+            fs::write(&resolved, updated.as_bytes()).map_err(|e| e.to_string())?;
+            Ok(AgentToolResult {
+                llm_output: "edit complete".to_string(),
+                ui_details: vec![("path".to_string(), resolved.display().to_string())],
             })
         }),
     }
@@ -180,17 +188,16 @@ fn create_bash_tool() -> AgentTool {
     AgentTool {
         spec: ToolSpec {
             name: "bash".to_string(),
-            description: "Execute shell command in workspace".to_string(),
+            description: "Execute shell command".to_string(),
             args: vec![ToolArgSpec {
                 name: "command".to_string(),
-                description: "Shell command to execute".to_string(),
                 required: true,
+                description: "Command to run".to_string(),
             }],
         },
         exec: Box::new(|cwd, args| {
-            let command = arg(args, "command")
-                .ok_or_else(|| "Missing required argument: command".to_string())?;
-            let out = Command::new("/usr/bin/timeout")
+            let command = arg_required(args, "command")?;
+            let output = Command::new("/usr/bin/timeout")
                 .arg("30")
                 .arg("/bin/sh")
                 .arg("-c")
@@ -198,74 +205,62 @@ fn create_bash_tool() -> AgentTool {
                 .current_dir(cwd)
                 .output()
                 .map_err(|e| e.to_string())?;
-            let mut text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            if !stderr.is_empty() {
+
+            let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if !err.is_empty() {
                 if !text.is_empty() {
                     text.push('\n');
                 }
-                text.push_str(&stderr);
+                text.push_str(&err);
             }
-            if text.is_empty() {
-                text = "(no output)".to_string();
-            }
+
             Ok(AgentToolResult {
-                llm_output: text,
-                ui_details: vec![
-                    ("command".to_string(), command),
-                    (
-                        "exit_status".to_string(),
-                        out.status
-                            .code()
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| "signal".to_string()),
-                    ),
-                ],
+                llm_output: if text.is_empty() {
+                    "(no output)".to_string()
+                } else {
+                    text
+                },
+                ui_details: vec![("command".to_string(), command)],
             })
         }),
     }
 }
 
-fn resolve(cwd: &Path, file: &str) -> PathBuf {
-    let p = PathBuf::from(file);
-    if p.is_absolute() {
-        p
-    } else {
-        cwd.join(p)
-    }
-}
-
-fn arg(args: &[(String, String)], key: &str) -> Option<String> {
-    args.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+fn arg_required(args: &[(String, String)], name: &str) -> Result<String, String> {
+    args.iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.clone())
+        .ok_or_else(|| format!("Missing required argument: {name}"))
 }
 
 fn validate_args(spec: &ToolSpec, args: &[(String, String)]) -> Result<(), String> {
+    for a in &spec.args {
+        if a.required && !args.iter().any(|(k, _)| k == &a.name) {
+            return Err(format!("Missing required argument: {}", a.name));
+        }
+    }
     let allowed = spec
         .args
         .iter()
         .map(|a| a.name.clone())
         .collect::<HashSet<_>>();
-
-    for a in &spec.args {
-        if a.required && arg(args, &a.name).is_none() {
-            return Err(format!("Missing required argument: {}", a.name));
-        }
-    }
-
-    for (key, _) in args {
-        if !allowed.contains(key) {
+    for (k, _) in args {
+        if !allowed.contains(k) {
             return Err(format!(
-                "Unknown argument '{}' for tool '{}'. Allowed: {}",
-                key,
-                spec.name,
-                spec.args
-                    .iter()
-                    .map(|a| a.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "Unknown argument '{}' for tool '{}'.",
+                k, spec.name
             ));
         }
     }
-
     Ok(())
+}
+
+fn resolve(cwd: &Path, path: &str) -> PathBuf {
+    let p = PathBuf::from(path);
+    if p.is_absolute() {
+        p
+    } else {
+        cwd.join(p)
+    }
 }

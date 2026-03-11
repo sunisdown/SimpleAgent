@@ -1,8 +1,8 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 
-use crate::llm::{ContentItem, Message};
+use crate::llm::{deserialize_context, serialize_context, Message};
 
 #[derive(Clone, Debug)]
 pub struct TapeEntry {
@@ -20,143 +20,78 @@ impl TapeStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        if !path.exists() {
-            fs::File::create(&path).map_err(|e| e.to_string())?;
+        if !Path::new(&path).exists() {
+            fs::write(&path, "").map_err(|e| e.to_string())?;
         }
         Ok(Self { path })
     }
 
-    pub fn append_message(&self, message: &Message) -> Result<TapeEntry, String> {
-        let text = message
-            .content
+    pub fn append_message(&self, message: &Message) -> Result<(), String> {
+        self.append("message", &serialize_context(std::slice::from_ref(message)))
+    }
+
+    pub fn append_event(&self, event: &str, fields: &[(String, String)]) -> Result<(), String> {
+        let flat = fields
             .iter()
-            .filter_map(|c| match c {
-                ContentItem::Text(t) => Some(t.clone()),
-                _ => None,
-            })
+            .map(|(k, v)| format!("{k}={}", escape(v)))
             .collect::<Vec<_>>()
-            .join("\\n");
-        self.append("message", &format!("{}|{}", message.role, sanitize(&text)))
-    }
-
-    pub fn append_event(&self, event: &str, payload: &str) -> Result<TapeEntry, String> {
-        self.append("event", &format!("{}|{}", event, sanitize(payload)))
-    }
-
-    pub fn append_event_json(
-        &self,
-        event: &str,
-        fields: &[(String, String)],
-    ) -> Result<TapeEntry, String> {
-        let mut encoded = vec![format!("\"event\":\"{}\"", json_escape(event))];
-        for (k, v) in fields {
-            encoded.push(format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)));
-        }
-        self.append("event", &format!("json|{{{}}}", encoded.join(",")))
-    }
-
-    pub fn append_anchor(
-        &self,
-        name: &str,
-        payload: &str,
-        entry_type: &str,
-    ) -> Result<TapeEntry, String> {
-        self.append(entry_type, &format!("{}|{}", name, sanitize(payload)))
+            .join(";");
+        self.append("event", &format!("event={event};{flat}"))
     }
 
     pub fn entries(&self) -> Result<Vec<TapeEntry>, String> {
-        let text = fs::read_to_string(&self.path).map_err(|e| e.to_string())?;
+        let file = OpenOptions::new()
+            .read(true)
+            .open(&self.path)
+            .map_err(|e| e.to_string())?;
+
         let mut out = Vec::new();
-        for line in text.lines() {
-            let parts = line.splitn(3, '\t').collect::<Vec<_>>();
-            if parts.len() != 3 {
+        for line in BufReader::new(file).lines() {
+            let line = line.map_err(|e| e.to_string())?;
+            if line.trim().is_empty() {
                 continue;
             }
-            let id = parts[0].parse::<usize>().unwrap_or(0);
+            let mut parts = line.splitn(3, '\t');
+            let id = parts
+                .next()
+                .unwrap_or("0")
+                .parse::<usize>()
+                .map_err(|e| e.to_string())?;
+            let entry_type = parts.next().unwrap_or_default().to_string();
+            let payload = parts.next().unwrap_or_default().to_string();
             out.push(TapeEntry {
                 id,
-                entry_type: parts[1].to_string(),
-                payload: parts[2].to_string(),
+                entry_type,
+                payload,
             });
         }
         Ok(out)
     }
 
-    pub fn search(&self, query: &str) -> Result<Vec<TapeEntry>, String> {
-        let q = query.trim().to_lowercase();
-        if q.is_empty() {
-            return Ok(vec![]);
-        }
-        Ok(self
-            .entries()?
-            .into_iter()
-            .filter(|e| {
-                format!("{} {}", e.entry_type, e.payload)
-                    .to_lowercase()
-                    .contains(&q)
-            })
-            .collect())
-    }
-
-    pub fn build_messages(&self, window: usize) -> Result<Vec<Message>, String> {
-        let entries = self.entries()?;
-        let start = entries
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, e)| e.entry_type == "handoff")
-            .map(|(idx, _)| idx + 1)
-            .unwrap_or(0);
-
-        let mut messages = Vec::new();
-        for e in entries.iter().skip(start) {
-            if e.entry_type != "message" {
-                continue;
+    pub fn build_messages(&self, context_window: usize) -> Result<Vec<Message>, String> {
+        let mut msgs = Vec::new();
+        for entry in self.entries()? {
+            if entry.entry_type == "message" {
+                msgs.extend(deserialize_context(&entry.payload));
             }
-            let parts = e.payload.splitn(2, '|').collect::<Vec<_>>();
-            if parts.len() != 2 {
-                continue;
-            }
-            messages.push(Message {
-                role: parts[0].to_string(),
-                content: vec![ContentItem::Text(desanitize(parts[1]))],
-            });
         }
-
-        if messages.len() > window {
-            Ok(messages[messages.len() - window..].to_vec())
+        if msgs.len() <= context_window {
+            Ok(msgs)
         } else {
-            Ok(messages)
+            Ok(msgs[msgs.len() - context_window..].to_vec())
         }
     }
 
-    fn append(&self, entry_type: &str, payload: &str) -> Result<TapeEntry, String> {
-        let next_id = self.entries()?.last().map(|e| e.id + 1).unwrap_or(1);
-        let line = format!("{}\t{}\t{}\n", next_id, entry_type, payload);
+    fn append(&self, entry_type: &str, payload: &str) -> Result<(), String> {
+        let next_id = self.entries()?.len() + 1;
         let mut file = OpenOptions::new()
             .append(true)
             .open(&self.path)
             .map_err(|e| e.to_string())?;
-        file.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
-        Ok(TapeEntry {
-            id: next_id,
-            entry_type: entry_type.to_string(),
-            payload: payload.to_string(),
-        })
+        writeln!(file, "{}\t{}\t{}", next_id, entry_type, payload).map_err(|e| e.to_string())
     }
 }
 
-fn sanitize(s: &str) -> String {
-    s.replace('\n', "\\n").replace('\t', "\\t")
-}
-
-fn desanitize(s: &str) -> String {
-    s.replace("\\n", "\n").replace("\\t", "\t")
-}
-
-fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\t', "\\t")
+fn escape(value: &str) -> String {
+    value.replace(';', "\\s").replace('=', "\\e")
 }
