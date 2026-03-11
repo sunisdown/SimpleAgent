@@ -6,7 +6,10 @@ use crate::llm::{extract_text, ContentItem, Message, ModelProvider};
 use crate::memory::TapeStore;
 use crate::router::{RouteKind, Router};
 use crate::tool_view::ProgressiveToolView;
-use crate::tools::{make_tool_result, ToolRegistry};
+use crate::tools::{make_tool_result, AgentToolResult, ToolRegistry};
+
+const SYSTEM_PROMPT_VERSION: &str = "v1";
+const SYSTEM_PROMPT_TEXT: &str = "You are SimpleAgent. Be concise, deterministic, and observable. Prefer tool calls when needed, and avoid hidden assumptions.";
 
 pub struct AgentLoop<P: ModelProvider> {
     provider: P,
@@ -51,19 +54,72 @@ impl<P: ModelProvider> AgentLoop<P> {
         self.tape.append_message(&user)?;
 
         let mut messages = self.tape.build_messages(self.context_window)?;
+        messages.insert(
+            0,
+            Message {
+                role: "system".to_string(),
+                content: vec![ContentItem::Text(SYSTEM_PROMPT_TEXT.to_string())],
+            },
+        );
+
+        let visible_tools = self.tool_view.specs();
+        self.tape.append_event_json(
+            "turn_start",
+            &[
+                (
+                    "prompt_version".to_string(),
+                    SYSTEM_PROMPT_VERSION.to_string(),
+                ),
+                (
+                    "toolset".to_string(),
+                    visible_tools
+                        .iter()
+                        .map(|t| t.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
+            ],
+        )?;
+
         let mut seen_calls: HashSet<String> = HashSet::new();
         let mut previous_plan: Option<String> = None;
         let mut repeated_plan_rounds = 0usize;
         let mut stalled_rounds = 0usize;
 
-        for _round in 0..self.max_rounds {
+        for round in 0..self.max_rounds {
             self.tool_view.activate_hints(text);
-            let assistant = self.provider.generate(&messages, &self.tool_view.specs());
+            let round_tools = self.tool_view.specs();
+            self.tape.append_event_json(
+                "round_start",
+                &[
+                    ("round".to_string(), round.to_string()),
+                    (
+                        "prompt_version".to_string(),
+                        SYSTEM_PROMPT_VERSION.to_string(),
+                    ),
+                    (
+                        "toolset".to_string(),
+                        round_tools
+                            .iter()
+                            .map(|t| t.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+                ],
+            )?;
+            let assistant = self.provider.generate(&messages, &round_tools);
             self.tape.append_message(&assistant)?;
             messages.push(assistant.clone());
 
             let tool_calls = collect_tool_calls(&assistant);
             if tool_calls.is_empty() {
+                self.tape.append_event_json(
+                    "turn_stop",
+                    &[
+                        ("reason".to_string(), "assistant_final".to_string()),
+                        ("round".to_string(), round.to_string()),
+                    ],
+                )?;
                 return Ok(extract_text(&assistant));
             }
 
@@ -76,6 +132,10 @@ impl<P: ModelProvider> AgentLoop<P> {
             previous_plan = Some(plan);
 
             if repeated_plan_rounds >= 2 {
+                self.tape.append_event_json(
+                    "turn_stop",
+                    &[("reason".to_string(), "repeated_plan".to_string())],
+                )?;
                 return Ok(
                     "Stopped: the model repeated the same tool plan in consecutive rounds."
                         .to_string(),
@@ -87,16 +147,16 @@ impl<P: ModelProvider> AgentLoop<P> {
 
             for (idx, (call_id, tool_name, args)) in tool_calls.iter().enumerate() {
                 if idx >= self.max_tool_calls_per_round {
-                    let limit_result = make_tool_result(
-                        "loop_guard",
-                        "system",
-                        format!(
+                    let limit_result = AgentToolResult {
+                        llm_output: format!(
                             "Tool plan exceeded per-round limit ({}). Remaining calls were skipped.",
                             self.max_tool_calls_per_round
                         ),
-                    );
-                    self.tape.append_message(&limit_result)?;
-                    messages.push(limit_result);
+                        ui_details: vec![("status".to_string(), "limit_exceeded".to_string())],
+                    };
+                    let message = make_tool_result("loop_guard", "system", &limit_result);
+                    self.tape.append_message(&message)?;
+                    messages.push(message);
                     break;
                 }
 
@@ -104,14 +164,13 @@ impl<P: ModelProvider> AgentLoop<P> {
                 let call_signature = format!("{}:{:?}", tool_name, args);
                 let (tool_result, status) = if seen_calls.contains(&call_signature) {
                     (
-                        make_tool_result(
-                            call_id,
-                            tool_name,
-                            format!(
+                        AgentToolResult {
+                            llm_output: format!(
                                 "Skipped duplicate tool call for this turn history: {} {:?}",
                                 tool_name, args
                             ),
-                        ),
+                            ui_details: vec![("status".to_string(), "duplicate".to_string())],
+                        },
                         "duplicate",
                     )
                 } else {
@@ -120,18 +179,33 @@ impl<P: ModelProvider> AgentLoop<P> {
                     match self.tools.execute(&self.workspace, tool_name, args) {
                         Ok(result) => {
                             succeeded_calls += 1;
-                            (make_tool_result(call_id, tool_name, result.text), "ok")
+                            (result, "ok")
                         }
-                        Err(err) => (make_tool_result(call_id, tool_name, err), "error"),
+                        Err(err) => (
+                            AgentToolResult {
+                                llm_output: err,
+                                ui_details: vec![("status".to_string(), "error".to_string())],
+                            },
+                            "error",
+                        ),
                     }
                 };
 
-                self.tape.append_message(&tool_result)?;
-                self.tape.append_event(
+                let tool_message = make_tool_result(call_id, tool_name, &tool_result);
+                self.tape.append_message(&tool_message)?;
+                self.tape.append_event_json(
                     "tool_call",
-                    &format!("tool={} status={} args={:?}", tool_name, status, args),
+                    &[
+                        ("tool".to_string(), tool_name.clone()),
+                        ("status".to_string(), status.to_string()),
+                        ("args".to_string(), format!("{:?}", args)),
+                        (
+                            "ui_details".to_string(),
+                            format!("{:?}", tool_result.ui_details),
+                        ),
+                    ],
                 )?;
-                messages.push(tool_result);
+                messages.push(tool_message);
             }
 
             let was_stalled = attempted_calls == 0 || succeeded_calls == 0;
@@ -142,6 +216,13 @@ impl<P: ModelProvider> AgentLoop<P> {
             }
 
             if stalled_rounds >= self.max_stalled_rounds {
+                self.tape.append_event_json(
+                    "turn_stop",
+                    &[
+                        ("reason".to_string(), "stalled_rounds".to_string()),
+                        ("count".to_string(), stalled_rounds.to_string()),
+                    ],
+                )?;
                 return Ok(format!(
                     "Stopped after {} stalled tool rounds (no successful calls).",
                     stalled_rounds
@@ -149,6 +230,13 @@ impl<P: ModelProvider> AgentLoop<P> {
             }
         }
 
+        self.tape.append_event_json(
+            "turn_stop",
+            &[
+                ("reason".to_string(), "max_rounds".to_string()),
+                ("max_rounds".to_string(), self.max_rounds.to_string()),
+            ],
+        )?;
         Ok(format!(
             "Tool-calling loop reached max rounds ({}).",
             self.max_rounds
@@ -292,10 +380,12 @@ mod tests {
             spec: ToolSpec {
                 name: "noop".to_string(),
                 description: "no-op".to_string(),
+                args: vec![],
             },
             exec: Box::new(|_, _| {
                 Ok(AgentToolResult {
-                    text: "ok".to_string(),
+                    llm_output: "ok".to_string(),
+                    ui_details: vec![],
                 })
             }),
         };
