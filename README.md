@@ -25,7 +25,6 @@ Supporting modules:
 - `src/memory.rs`: append-only JSONL tape store.
 - `src/runtime.rs`: runtime profiles (`yolo`, `readonly`, `custom`).
 - `src/agent_config.rs`: versioned system prompt + loop limits.
-- `src/router.rs`: slash-command and shell-route parsing.
 - `src/tool_view.rs`: progressive tool visibility.
 
 ## Commands

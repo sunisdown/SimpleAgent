@@ -2,7 +2,6 @@ mod agent_config;
 mod core;
 mod llm;
 mod memory;
-mod router;
 mod runtime;
 mod tool_view;
 mod tools;

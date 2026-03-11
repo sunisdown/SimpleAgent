@@ -5,7 +5,6 @@ use std::process::Command;
 use crate::agent_config::AgentConfig;
 use crate::llm::{extract_text, ContentItem, Message, ModelProvider, ProviderRequest, StreamEvent};
 use crate::memory::TapeStore;
-use crate::router::{RouteKind, Router};
 use crate::runtime::RuntimeProfile;
 use crate::tool_view::ProgressiveToolView;
 use crate::tools::{make_tool_message, ToolRegistry};
@@ -15,7 +14,6 @@ pub struct AgentLoop<P: ModelProvider> {
     tools: ToolRegistry,
     tape: TapeStore,
     workspace: PathBuf,
-    router: Router,
     tool_view: ProgressiveToolView,
     profile: RuntimeProfile,
     config: AgentConfig,
@@ -36,7 +34,6 @@ impl<P: ModelProvider> AgentLoop<P> {
             tools,
             tape,
             workspace,
-            router: Router,
             tool_view,
             profile,
             config,
@@ -44,20 +41,24 @@ impl<P: ModelProvider> AgentLoop<P> {
     }
 
     pub fn handle_input(&mut self, input: &str) -> Result<String, String> {
-        let route = self.router.route(input);
-        match route.kind {
-            RouteKind::Command => {
-                self.handle_command(route.command.as_deref().unwrap_or("help"), &route.args)
-            }
-            RouteKind::Shell => {
-                if self.profile.shell_route_allowed() {
-                    self.run_shell(&route.args)
-                } else {
-                    Ok("shell route disabled for current profile".to_string())
-                }
-            }
-            RouteKind::Prompt => self.run_turn(input),
+        let trimmed = input.trim();
+
+        if let Some(rest) = trimmed.strip_prefix('!') {
+            return if self.profile.shell_route_allowed() {
+                self.run_shell(rest.trim())
+            } else {
+                Ok("shell route disabled for current profile".to_string())
+            };
         }
+
+        if let Some(rest) = trimmed.strip_prefix('/') {
+            let mut parts = rest.splitn(2, ' ');
+            let command = parts.next().map(str::trim).unwrap_or("help");
+            let args = parts.next().map(str::trim).unwrap_or_default();
+            return self.handle_command(command, args);
+        }
+
+        self.run_turn(input)
     }
 
     fn run_turn(&mut self, input: &str) -> Result<String, String> {
