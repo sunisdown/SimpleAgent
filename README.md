@@ -29,6 +29,10 @@ cargo run -- "/tools"
 cargo run -- "/handoff phase-2"
 ```
 
+## Design
+
+- Detailed Pi-inspired design doc: `docs/pi-agent-design.md`
+
 ## Notes
 
 - Session memory is stored at `.simple_agent/<session>.jsonl`.
