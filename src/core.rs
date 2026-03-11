@@ -118,6 +118,19 @@ impl<P: ModelProvider> AgentLoop<P> {
                     ("profile".to_string(), self.profile.name().to_string()),
                 ],
             )?;
+
+            let stream_events = self.provider.stream_generate(
+                ProviderRequest {
+                    messages: messages.clone(),
+                    tools: round_tools.clone(),
+                    max_output_tokens: Some(1024),
+                    temperature: Some(0.0),
+                    stream: true,
+                },
+                &AbortSignal::new(),
+            )?;
+            self.record_stream_events(round, &stream_events)?;
+
             let response = self.provider.generate(
                 ProviderRequest {
                     messages: messages.clone(),
@@ -239,6 +252,7 @@ impl<P: ModelProvider> AgentLoop<P> {
                 };
 
                 let tool_message = make_tool_result(call_id, tool_name, &tool_result);
+                self.stream_tool_result_chunks(round, tool_name, &tool_result.llm_output)?;
                 self.tape.append_message(&tool_message)?;
                 self.tape.append_event_json(
                     "tool_call",
@@ -446,6 +460,76 @@ impl<P: ModelProvider> AgentLoop<P> {
 
         Ok(format!("$ {command}\n{text}"))
     }
+
+    fn record_stream_events(
+        &self,
+        round: usize,
+        events: &[crate::llm::StreamEvent],
+    ) -> Result<(), String> {
+        for (idx, event) in events.iter().enumerate() {
+            match event {
+                crate::llm::StreamEvent::TextDelta(delta) => {
+                    self.tape.append_event_json(
+                        "assistant_text_delta",
+                        &[
+                            ("round".to_string(), round.to_string()),
+                            ("index".to_string(), idx.to_string()),
+                            ("delta".to_string(), delta.clone()),
+                        ],
+                    )?;
+                }
+                crate::llm::StreamEvent::ToolCallDelta { name, partial_args } => {
+                    let parsed = parse_partial_args(partial_args);
+                    self.tape.append_event_json(
+                        "tool_args_partial",
+                        &[
+                            ("round".to_string(), round.to_string()),
+                            ("index".to_string(), idx.to_string()),
+                            ("tool".to_string(), name.clone()),
+                            ("partial".to_string(), partial_args.clone()),
+                            ("parsed_pairs".to_string(), parsed.len().to_string()),
+                            ("parsed".to_string(), format!("{:?}", parsed)),
+                        ],
+                    )?;
+                }
+                crate::llm::StreamEvent::Done(usage) => {
+                    self.tape.append_event_json(
+                        "assistant_stream_done",
+                        &[
+                            ("round".to_string(), round.to_string()),
+                            ("index".to_string(), idx.to_string()),
+                            ("input_tokens".to_string(), usage.input_tokens.to_string()),
+                            ("output_tokens".to_string(), usage.output_tokens.to_string()),
+                            ("total_tokens".to_string(), usage.total_tokens.to_string()),
+                        ],
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn stream_tool_result_chunks(
+        &self,
+        round: usize,
+        tool_name: &str,
+        output: &str,
+    ) -> Result<(), String> {
+        let chunks = chunk_text(output, 160);
+        for (idx, chunk) in chunks.iter().enumerate() {
+            self.tape.append_event_json(
+                "tool_result_chunk",
+                &[
+                    ("round".to_string(), round.to_string()),
+                    ("tool".to_string(), tool_name.to_string()),
+                    ("index".to_string(), idx.to_string()),
+                    ("chunks".to_string(), chunks.len().to_string()),
+                    ("chunk".to_string(), chunk.clone()),
+                ],
+            )?;
+        }
+        Ok(())
+    }
 }
 
 fn collect_tool_calls(message: &Message) -> Vec<(String, String, Vec<(String, String)>)> {
@@ -469,6 +553,40 @@ fn signature_for_plan(tool_calls: &[(String, String, Vec<(String, String)>)]) ->
         .map(|(_, name, args)| format!("{}:{:?}", name, args))
         .collect::<Vec<_>>()
         .join("|")
+}
+
+fn parse_partial_args(partial: &str) -> Vec<(String, String)> {
+    partial
+        .split(',')
+        .filter_map(|segment| {
+            let (key, value) = segment.split_once('=')?;
+            let key = key.trim();
+            if key.is_empty() {
+                return None;
+            }
+            Some((key.to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec!["".to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        current.push(ch);
+        if current.chars().count() >= max_chars {
+            chunks.push(current);
+            current = String::new();
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 #[cfg(test)]
@@ -556,5 +674,23 @@ mod tests {
         assert!(output.contains("repeated the same tool plan"));
 
         let _ = fs::remove_file(tape_path);
+    }
+
+    #[test]
+    fn partial_args_parser_handles_pairs() {
+        let parsed = parse_partial_args("path=src/main.rs, mode=read");
+        assert_eq!(
+            parsed,
+            vec![
+                ("path".to_string(), "src/main.rs".to_string()),
+                ("mode".to_string(), "read".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn chunk_text_splits_large_payload() {
+        let chunks = chunk_text("abcdefgh", 3);
+        assert_eq!(chunks, vec!["abc", "def", "gh"]);
     }
 }
