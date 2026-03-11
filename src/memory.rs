@@ -43,6 +43,18 @@ impl TapeStore {
         self.append("event", &format!("{}|{}", event, sanitize(payload)))
     }
 
+    pub fn append_event_json(
+        &self,
+        event: &str,
+        fields: &[(String, String)],
+    ) -> Result<TapeEntry, String> {
+        let mut encoded = vec![format!("\"event\":\"{}\"", json_escape(event))];
+        for (k, v) in fields {
+            encoded.push(format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)));
+        }
+        self.append("event", &format!("json|{{{}}}", encoded.join(",")))
+    }
+
     pub fn append_anchor(
         &self,
         name: &str,
@@ -140,4 +152,11 @@ fn sanitize(s: &str) -> String {
 
 fn desanitize(s: &str) -> String {
     s.replace("\\n", "\n").replace("\\t", "\t")
+}
+
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
 }
