@@ -41,6 +41,6 @@ This plan breaks `docs/pi-agent-design.md` into implementation phases and define
 ## Phase 4 — Optional Advanced
 
 ### Deliverables
-- Stream tool results in chunks.
-- Emit partial tool-argument parse events.
+- [x] Stream tool results in chunks.
+- [x] Emit partial tool-argument parse events.
 - Add optional MCP adapter (off by default) when demand is proven.
