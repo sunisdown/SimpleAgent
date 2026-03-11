@@ -1,7 +1,15 @@
 #[derive(Clone, Debug)]
+pub struct ToolArgSpec {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct ToolSpec {
     pub name: String,
     pub description: String,
+    pub args: Vec<ToolArgSpec>,
 }
 
 #[derive(Clone, Debug)]
