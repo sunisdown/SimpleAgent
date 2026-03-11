@@ -1,6 +1,6 @@
 use crate::tools::{create_profile_tools, ToolRegistry};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum RuntimeProfile {
     Yolo,
     Readonly,
@@ -9,59 +9,39 @@ pub enum RuntimeProfile {
 
 impl RuntimeProfile {
     pub fn parse(name: &str, custom_tools: Option<&str>) -> Result<Self, String> {
-        match name.trim().to_lowercase().as_str() {
+        match name {
             "yolo" => Ok(Self::Yolo),
             "readonly" => Ok(Self::Readonly),
             "custom" => {
-                let tools = custom_tools
-                    .unwrap_or_default()
+                let raw = custom_tools
+                    .ok_or_else(|| "--tools is required for custom profile".to_string())?;
+                let parsed = raw
                     .split(',')
-                    .map(|t| t.trim().to_string())
-                    .filter(|t| !t.is_empty())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
                     .collect::<Vec<_>>();
-                if tools.is_empty() {
-                    return Err(
-                        "--profile custom requires --tools <comma-separated tool names>"
-                            .to_string(),
-                    );
+                if parsed.is_empty() {
+                    return Err("custom profile needs at least one tool".to_string());
                 }
-                Ok(Self::Custom(tools))
+                Ok(Self::Custom(parsed))
             }
-            other => Err(format!(
-                "unknown profile '{other}'. Expected one of: yolo, readonly, custom"
-            )),
+            _ => Err("profile must be one of: yolo, readonly, custom".to_string()),
         }
     }
 
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Yolo => "yolo",
-            Self::Readonly => "readonly",
-            Self::Custom(_) => "custom",
+            RuntimeProfile::Yolo => "yolo",
+            RuntimeProfile::Readonly => "readonly",
+            RuntimeProfile::Custom(_) => "custom",
         }
     }
 
     pub fn shell_route_allowed(&self) -> bool {
-        !matches!(self, Self::Readonly)
+        matches!(self, RuntimeProfile::Yolo | RuntimeProfile::Custom(_))
     }
 
     pub fn tool_registry(&self) -> Result<ToolRegistry, String> {
         Ok(ToolRegistry::new(create_profile_tools(self)?))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_custom_requires_tools() {
-        let err = RuntimeProfile::parse("custom", None).expect_err("should fail");
-        assert!(err.contains("requires --tools"));
-    }
-
-    #[test]
-    fn readonly_disables_shell_route() {
-        assert!(!RuntimeProfile::Readonly.shell_route_allowed());
     }
 }

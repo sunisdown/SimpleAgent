@@ -1,43 +1,46 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::llm::ToolSpec;
 
 pub struct ProgressiveToolView {
-    tools: HashMap<String, ToolSpec>,
+    all: Vec<ToolSpec>,
     active: HashSet<String>,
 }
 
 impl ProgressiveToolView {
-    pub fn new(tools: Vec<ToolSpec>) -> Self {
-        Self {
-            tools: tools.into_iter().map(|t| (t.name.clone(), t)).collect(),
-            active: HashSet::new(),
-        }
-    }
-
-    pub fn activate_hints(&mut self, text: &str) {
-        for word in text.split_whitespace() {
-            if let Some(name) = word.strip_prefix('$') {
-                if self.tools.contains_key(name) {
-                    self.active.insert(name.to_string());
-                }
+    pub fn new(all: Vec<ToolSpec>) -> Self {
+        let mut active = HashSet::new();
+        for tool in &all {
+            if tool.name == "read" {
+                active.insert(tool.name.clone());
             }
         }
+        Self { all, active }
     }
 
-    pub fn note_selected(&mut self, tool_name: &str) {
-        if self.tools.contains_key(tool_name) {
-            self.active.insert(tool_name.to_string());
+    pub fn activate_hints(&mut self, input: &str) {
+        let input = input.to_lowercase();
+        if input.contains("bash") || input.contains("command") {
+            self.active.insert("bash".to_string());
         }
+        if input.contains("write") || input.contains("edit") {
+            self.active.insert("write".to_string());
+            self.active.insert("edit".to_string());
+        }
+        if input.contains("read") || input.contains("file") {
+            self.active.insert("read".to_string());
+        }
+    }
+
+    pub fn note_selected(&mut self, tool: &str) {
+        self.active.insert(tool.to_string());
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
-        if self.active.is_empty() {
-            return self.tools.values().cloned().collect();
-        }
-        self.active
+        self.all
             .iter()
-            .filter_map(|name| self.tools.get(name).cloned())
+            .filter(|tool| self.active.contains(&tool.name))
+            .cloned()
             .collect()
     }
 }

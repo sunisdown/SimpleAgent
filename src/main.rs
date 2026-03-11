@@ -1,3 +1,4 @@
+mod agent_config;
 mod core;
 mod llm;
 mod memory;
@@ -9,10 +10,11 @@ mod tools;
 use std::env;
 use std::path::PathBuf;
 
-use crate::core::AgentLoop;
-use crate::llm::MockProvider;
-use crate::memory::TapeStore;
-use crate::runtime::RuntimeProfile;
+use agent_config::AgentConfig;
+use core::AgentLoop;
+use llm::MockProvider;
+use memory::TapeStore;
+use runtime::RuntimeProfile;
 
 fn main() {
     if let Err(err) = run() {
@@ -31,7 +33,7 @@ fn run() -> Result<(), String> {
     let mut session = "default".to_string();
     let mut profile_name = "yolo".to_string();
     let mut custom_tools: Option<String> = None;
-    let mut prompt_parts = Vec::<String>::new();
+    let mut prompt_parts = Vec::new();
 
     while !args.is_empty() {
         let arg = args.remove(0);
@@ -62,7 +64,6 @@ fn run() -> Result<(), String> {
     }
 
     let profile = RuntimeProfile::parse(&profile_name, custom_tools.as_deref())?;
-
     let workspace = cwd.canonicalize().unwrap_or(cwd);
     let tape = TapeStore::new(
         workspace
@@ -70,9 +71,17 @@ fn run() -> Result<(), String> {
             .join(format!("{session}.tape")),
     )?;
     let registry = profile.tool_registry()?;
-    let mut loop_engine = AgentLoop::new(MockProvider::new(), registry, tape, workspace, profile);
 
-    let output = loop_engine.handle_input(&prompt)?;
+    let mut agent = AgentLoop::new(
+        MockProvider::new(),
+        registry,
+        tape,
+        workspace,
+        profile,
+        AgentConfig::default(),
+    );
+
+    let output = agent.handle_input(&prompt)?;
     println!("{output}");
     Ok(())
 }

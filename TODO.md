@@ -4,11 +4,11 @@ Use this as the short-lived execution checklist companion to `PLAN.md`.
 
 ## Current queue
 
-- [ ] Confirm phase scope in `PLAN.md`.
-- [ ] Break work into concrete code/docs tasks.
-- [ ] Run `cargo fmt -- --check`.
-- [ ] Run `cargo test`.
-- [ ] Record handoff with `/handoff <name>`.
+- [x] Confirm phase scope in `PLAN.md`.
+- [x] Break work into concrete code/docs tasks.
+- [x] Run `cargo fmt -- --check`.
+- [x] Run `cargo test`.
+- [x] Record handoff with `/handoff <name>`.
 
 ## Notes
 

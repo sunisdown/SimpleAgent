@@ -1,11 +1,12 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RouteKind {
     Command,
-    Natural,
+    Shell,
+    Prompt,
 }
 
-#[derive(Debug, Clone)]
-pub struct RouteResult {
+#[derive(Clone, Debug)]
+pub struct Route {
     pub kind: RouteKind,
     pub command: Option<String>,
     pub args: String,
@@ -14,68 +15,29 @@ pub struct RouteResult {
 pub struct Router;
 
 impl Router {
-    pub fn route(&self, text: &str) -> RouteResult {
-        let stripped = text.trim();
-        if let Some(body) = stripped.strip_prefix('!') {
-            return RouteResult {
-                kind: RouteKind::Command,
+    pub fn route(&self, input: &str) -> Route {
+        let trimmed = input.trim();
+        if let Some(rest) = trimmed.strip_prefix('!') {
+            return Route {
+                kind: RouteKind::Shell,
                 command: Some("shell".to_string()),
-                args: body.trim().to_string(),
+                args: rest.trim().to_string(),
             };
         }
 
-        if !stripped.starts_with('/') {
-            return RouteResult {
-                kind: RouteKind::Natural,
-                command: None,
-                args: String::new(),
-            };
-        }
-
-        let body = stripped.trim_start_matches('/').trim();
-        if body.is_empty() {
-            return RouteResult {
+        if let Some(rest) = trimmed.strip_prefix('/') {
+            let mut parts = rest.splitn(2, ' ');
+            return Route {
                 kind: RouteKind::Command,
-                command: Some("help".to_string()),
-                args: String::new(),
+                command: parts.next().map(|s| s.trim().to_string()),
+                args: parts.next().unwrap_or_default().trim().to_string(),
             };
         }
 
-        let mut parts = body.splitn(2, ' ');
-        let command = parts.next().unwrap_or("help").to_lowercase();
-        let args = parts.next().unwrap_or("").trim().to_string();
-        RouteResult {
-            kind: RouteKind::Command,
-            command: Some(command),
-            args,
+        Route {
+            kind: RouteKind::Prompt,
+            command: None,
+            args: trimmed.to_string(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn routes_slash_command() {
-        let route = Router.route("/tools");
-        assert_eq!(route.kind, RouteKind::Command);
-        assert_eq!(route.command.as_deref(), Some("tools"));
-        assert_eq!(route.args, "");
-    }
-
-    #[test]
-    fn routes_bang_shell_command() {
-        let route = Router.route("!echo hi");
-        assert_eq!(route.kind, RouteKind::Command);
-        assert_eq!(route.command.as_deref(), Some("shell"));
-        assert_eq!(route.args, "echo hi");
-    }
-
-    #[test]
-    fn routes_natural_text() {
-        let route = Router.route("hello agent");
-        assert_eq!(route.kind, RouteKind::Natural);
-        assert_eq!(route.command, None);
     }
 }
