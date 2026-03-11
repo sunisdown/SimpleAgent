@@ -21,14 +21,14 @@ This plan breaks `docs/pi-agent-design.md` into implementation phases and define
 - `cargo test`
 - Manual run demonstrates event metadata in tape output.
 
-## Phase 2 — Provider Robustness
+## Phase 2 — Provider Robustness ✅
 
 ### Deliverables
-- Extract provider adapters for different provider API shapes.
-- Normalize provider-specific request/response quirks.
-- Add streaming interface and cancellation propagation.
-- Add token/cost accounting (best effort) into event stream.
-- Add context serialize/deserialize fixtures for replay.
+- [x] Extract provider adapters for different provider API shapes.
+- [x] Normalize provider-specific request/response quirks.
+- [x] Add streaming interface and cancellation propagation.
+- [x] Add token/cost accounting (best effort) into event stream.
+- [x] Add context serialize/deserialize fixtures for replay.
 
 ## Phase 3 — Workflow Ergonomics
 

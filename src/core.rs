@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::llm::{extract_text, ContentItem, Message, ModelProvider};
+use crate::llm::{extract_text, AbortSignal, ContentItem, Message, ModelProvider, ProviderRequest};
 use crate::memory::TapeStore;
 use crate::router::{RouteKind, Router};
 use crate::tool_view::ProgressiveToolView;
@@ -107,9 +107,45 @@ impl<P: ModelProvider> AgentLoop<P> {
                     ),
                 ],
             )?;
-            let assistant = self.provider.generate(&messages, &round_tools);
+            let response = self.provider.generate(
+                ProviderRequest {
+                    messages: messages.clone(),
+                    tools: round_tools.clone(),
+                    max_output_tokens: Some(1024),
+                    temperature: Some(0.0),
+                    stream: false,
+                },
+                &AbortSignal::new(),
+            );
+            let assistant = response.message;
             self.tape.append_message(&assistant)?;
             messages.push(assistant.clone());
+            self.tape.append_event_json(
+                "provider_usage",
+                &[
+                    ("provider".to_string(), response.provider_id),
+                    (
+                        "input_tokens".to_string(),
+                        response.usage.input_tokens.to_string(),
+                    ),
+                    (
+                        "output_tokens".to_string(),
+                        response.usage.output_tokens.to_string(),
+                    ),
+                    (
+                        "total_tokens".to_string(),
+                        response.usage.total_tokens.to_string(),
+                    ),
+                    (
+                        "estimated_cost_usd".to_string(),
+                        format!("{:.6}", response.usage.estimated_cost_usd),
+                    ),
+                    (
+                        "normalization_notes".to_string(),
+                        response.normalization_notes.join(","),
+                    ),
+                ],
+            )?;
 
             let tool_calls = collect_tool_calls(&assistant);
             if tool_calls.is_empty() {
@@ -345,21 +381,42 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::llm::{ContentItem, Message, ModelProvider, ToolSpec};
+    use crate::llm::{
+        AbortSignal, ContentItem, Message, ModelProvider, ProviderRequest, ProviderResponse,
+        ProviderUsage, StreamEvent, ToolSpec,
+    };
     use crate::tools::{AgentTool, AgentToolResult, ToolRegistry};
 
     struct RepeatingToolProvider;
 
     impl ModelProvider for RepeatingToolProvider {
-        fn generate(&mut self, _messages: &[Message], _tools: &[ToolSpec]) -> Message {
-            Message {
-                role: "assistant".to_string(),
-                content: vec![ContentItem::ToolCall {
-                    id: "call_1".to_string(),
-                    name: "noop".to_string(),
-                    arguments: vec![("x".to_string(), "1".to_string())],
-                }],
+        fn generate(
+            &mut self,
+            _request: ProviderRequest,
+            _abort: &AbortSignal,
+        ) -> ProviderResponse {
+            ProviderResponse {
+                message: Message {
+                    role: "assistant".to_string(),
+                    content: vec![ContentItem::ToolCall {
+                        id: "call_1".to_string(),
+                        name: "noop".to_string(),
+                        arguments: vec![("x".to_string(), "1".to_string())],
+                    }],
+                },
+                usage: ProviderUsage::default(),
+                stop_reason: "completed".to_string(),
+                provider_id: "test-provider".to_string(),
+                normalization_notes: vec![],
             }
+        }
+
+        fn stream_generate(
+            &mut self,
+            _request: ProviderRequest,
+            _abort: &AbortSignal,
+        ) -> Result<Vec<StreamEvent>, String> {
+            Ok(vec![])
         }
     }
 
